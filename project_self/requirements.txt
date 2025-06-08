@@ -1,0 +1,9 @@
+gradio>=4.0.0
+zipfile36
+pathlib
+numpy
+pandas
+matplotlib>=3.5
+plotly>=5.0
+zhplot
+amulet-core
