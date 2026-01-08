@@ -14,3 +14,10 @@ Go (https://curve.yy-li.com) to try, it works slowly cause it based on my own VP
 - 安装requirements.txt中的包  |  Intasll the python packages in requireents.txt
 - 运行combined_demo.py  |  Run combined_demo.py
 - 浏览器访问https://127.0.0.1:7860
+
+*如果出现空间不足，可以修改临时文件存储位置*
+```
+$env:TEMP = "D:\gradio_tmp"  
+$env:TMP  = "D:\gradio_tmp" 
+New-Item -ItemType Directory -Path $env:TEMP -Force | Out-Null
+```

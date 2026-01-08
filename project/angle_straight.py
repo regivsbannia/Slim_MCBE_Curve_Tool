@@ -3,11 +3,12 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import zhplot
 
-def unit_vector(k):
+def unit_vector(k, direction=1):
+    """计算单位向量，direction参数用于控制方向（1或-1）"""
     if k == float('inf') or abs(k) > 1e6:
-        return (0.0, 1.0)
+        return (0.0, 1.0 * direction)
     norm = math.sqrt(1 + k**2)
-    return (1.0 / norm, k / norm)
+    return (1.0 / norm * direction, k / norm * direction)
 
 def remove_duplicates(pts):
     seen = set()
@@ -67,12 +68,37 @@ def generate_line(P0, P1, samples_per_unit=1.0):
     return consistent, [(x0 + t * dx, y0 + t * dy) for t in [i/N for i in range(N+1)]]
 
 def generate_bezier(P0, P3, k1, k2, curvature, samples_per_unit=1.5):
+    # 计算起点到终点的方向
+    dx_total = P3[0] - P0[0]
+    dy_total = P3[1] - P0[1]
+    
+    # 根据方向调整斜率为0或无穷大时的单位向量
+    direction_x = 1 if dx_total >= 0 else -1
+    direction_y = 1 if dy_total >= 0 else -1
+    
+    # 处理起点切线方向
+    if k1 == 0:
+        # 水平切线，方向与x轴方向一致
+        ux1, uy1 = unit_vector(k1, direction_x)
+    elif k1 == float('inf'):
+        # 垂直切线，方向与y轴方向一致
+        ux1, uy1 = unit_vector(k1, direction_y)
+    else:
+        ux1, uy1 = unit_vector(k1)
+    
+    # 处理终点切线方向
+    if k2 == 0:
+        # 水平切线，方向与x轴方向一致
+        ux2, uy2 = unit_vector(k2, direction_x)
+    elif k2 == float('inf'):
+        # 垂直切线，方向与y轴方向一致
+        ux2, uy2 = unit_vector(k2, direction_y)
+    else:
+        ux2, uy2 = unit_vector(k2)
+
     d = math.hypot(P3[0] - P0[0], P3[1] - P0[1])
     d1 = d / curvature
     d2 = d / curvature
-
-    ux1, uy1 = unit_vector(k1)
-    ux2, uy2 = unit_vector(k2)
 
     P1 = (P0[0] + d1 * ux1, P0[1] + d1 * uy1)
     P2 = (P3[0] - d2 * ux2, P3[1] - d2 * uy2)
@@ -99,8 +125,17 @@ def generate_bezier(P0, P3, k1, k2, curvature, samples_per_unit=1.5):
     return consistent, curve_points, (P0, P1, P2, P3)
 
 def draw_arrow(ax, point, k, length=8, color='green'):
-    ux, uy = unit_vector(k)
-    ax.arrow(point[0], point[1], ux*length, uy*length, head_width=2, head_length=4, fc=color, ec=color)
+    # 计算箭头的方向
+    dx_total = 1  # 默认向右
+    if k == float('inf') or abs(k) > 1e6:
+        dx, dy = 0, 1  # 垂直向上
+    elif k == 0:
+        dx, dy = 1, 0  # 水平向右
+    else:
+        norm = math.sqrt(1 + k**2)
+        dx, dy = 1.0 / norm, k / norm
+    
+    ax.arrow(point[0], point[1], dx*length, dy*length, head_width=2, head_length=4, fc=color, ec=color)
 
 def plot_full_track(a, b, k1, k2, track_width=1.0, curvature=3.0, via=None, k_via=None, ground_height=0.0, use_line=False):
     all_points = []
