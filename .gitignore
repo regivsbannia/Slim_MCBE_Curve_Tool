@@ -1,0 +1,78 @@
+# =========================
+# Python cache & compiled
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+*.pyd
+*.dll
+*.dylib
+
+# =========================
+# Distribution / packaging
+# =========================
+build/
+dist/
+*.egg
+*.egg-info/
+*.whl
+*.tar.gz
+*.zip
+
+# =========================
+# Virtual environments
+# =========================
+# venv
+venv/
+ENV/
+env/
+.venv/
+
+# Conda environment
+*.conda
+*.condarc
+.env/
+.envs/
+.conda/
+
+# =========================
+# VSCode / IDE config
+# =========================
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# =========================
+# System files
+# =========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =========================
+# Jupyter / IPython
+# =========================
+.ipynb_checkpoints/
+*.ipynb
+profile_default/
+ipython_config.py
+
+# =========================
+# Secrets / local config
+# =========================
+.env
+.env.local
+.env.*.local
+secrets.json
+
+# =========================
+# Optional: Test & cache files
+# =========================
+.cache/
+.pytest_cache/
+*.cover
+htmlcov/
