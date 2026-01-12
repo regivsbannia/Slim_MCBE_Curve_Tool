@@ -4,6 +4,9 @@ import tempfile
 import os
 import shutil
 from pathlib import Path
+import threading
+import time
+from datetime import datetime, timedelta
 
 from file_fill import fill_from_file
 from region_input import fill_region
@@ -18,11 +21,90 @@ import pandas as pd
 import plotly.graph_objects as go
 import zhplot
 
+# === 全局配置 ===
+MAX_CONCURRENT_USERS = 5  # 最大同时访问人数
+current_users = 0
+current_users_lock = threading.Lock()
+
+# === 临时文件管理器 ===
+class TempFileManager:
+    def __init__(self):
+        self.temp_files = []
+        self.lock = threading.Lock()
+        
+    def add_file(self, file_path):
+        with self.lock:
+            self.temp_files.append({
+                'path': file_path,
+                'created_at': datetime.now()
+            })
+            
+    def cleanup_old_files(self, max_age_minutes=30):
+        """清理超过指定时间的临时文件"""
+        with self.lock:
+            now = datetime.now()
+            to_remove = []
+            for file_info in self.temp_files:
+                if os.path.exists(file_info['path']):
+                    file_age = now - file_info['created_at']
+                    if file_age > timedelta(minutes=max_age_minutes):
+                        try:
+                            os.unlink(file_info['path'])
+                            to_remove.append(file_info)
+                        except:
+                            pass
+            for file_info in to_remove:
+                self.temp_files.remove(file_info)
+                
+    def cleanup_all(self):
+        """清理所有临时文件"""
+        with self.lock:
+            for file_info in self.temp_files:
+                if os.path.exists(file_info['path']):
+                    try:
+                        os.unlink(file_info['path'])
+                    except:
+                        pass
+            self.temp_files.clear()
+
+temp_manager = TempFileManager()
+
+# 启动后台清理线程
+def cleanup_daemon():
+    while True:
+        time.sleep(300)  # 每5分钟清理一次
+        temp_manager.cleanup_old_files()
+
+cleanup_thread = threading.Thread(target=cleanup_daemon, daemon=True)
+cleanup_thread.start()
+
+# === 用户访问控制 ===
+def check_user_limit():
+    """检查是否超过用户限制"""
+    global current_users
+    with current_users_lock:
+        if current_users >= MAX_CONCURRENT_USERS:
+            return False, "当前服务器访问人数过多，请稍后再试。\n建议下载本地版本使用：https://github.com/regivsbannia/Slim_MCBE_Curve_Tool"
+        current_users += 1
+        return True, f"欢迎使用！当前在线用户：{current_users}/{MAX_CONCURRENT_USERS}"
+
+def release_user():
+    """释放用户计数"""
+    global current_users
+    with current_users_lock:
+        if current_users > 0:
+            current_users -= 1
+
 # === 火车轨道设计 & 像素圆功能 ===
 
 def generate_track_design(mode, x0, y0, x1, y1, k1, k2,
                           track_width, curvature, ground_height,
                           use_mid_point, xm, ym, k_mid):
+    # 检查用户限制
+    allowed, msg = check_user_limit()
+    if not allowed:
+        raise gr.Error(msg)
+    
     try:
         html_file = None
         plotly_fig = None
@@ -66,6 +148,7 @@ def generate_track_design(mode, x0, y0, x1, y1, k1, k2,
         static_img = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
         plt.savefig(static_img.name, bbox_inches='tight', dpi=100)
         plt.close(fig)
+        temp_manager.add_file(static_img.name)
 
         coord_file = "rail_output.txt"
         if os.path.exists(coord_file):
@@ -106,83 +189,42 @@ def generate_track_design(mode, x0, y0, x1, y1, k1, k2,
             html_file = tempfile.NamedTemporaryFile(suffix=".html", delete=False)
             plotly_fig.write_html(html_file.name)
             html_file.close()
+            temp_manager.add_file(html_file.name)
 
         temp_coord_file = tempfile.NamedTemporaryFile(suffix=".txt", delete=False)
         coords.to_csv(temp_coord_file.name, sep=' ', index=False, header=False)
         temp_coord_file.close()
+        temp_manager.add_file(temp_coord_file.name)
 
         return static_img.name, temp_coord_file.name, html_file.name if html_file else None, coords.round(2).values.tolist(), plotly_fig
 
     except Exception as e:
+        release_user()  # 出错时释放用户计数
         raise gr.Error(f"生成轨道设计时出错: {str(e)}")
 
-
 def gradio_draw_quarter_circle(r):
-    return draw_quarter_circle_image(r)
-
-# === Minecraft 世界多步骤编辑功能 ===
-
-def unzip_world(zip_file):
-    tmp_dir = tempfile.mkdtemp()
-    with zipfile.ZipFile(zip_file.name, 'r') as zip_ref:
-        zip_ref.extractall(tmp_dir)
-    # 如果解压后没有直接的 level.dat，则进入第一层子目录
-    if not (Path(tmp_dir) / "level.dat").exists():
-        subdirs = [f for f in Path(tmp_dir).iterdir() if f.is_dir()]
-        if subdirs:
-            return str(subdirs[0])
-    return tmp_dir
-
-def zip_world_folder(world_folder):
-    zip_path = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
-    with zipfile.ZipFile(zip_path.name, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        for root, _, files in os.walk(world_folder):
-            for file in files:
-                file_path = os.path.join(root, file)
-                arcname = os.path.relpath(file_path, world_folder)
-                zipf.write(file_path, arcname)
-    return zip_path.name
-
-def start_session(world_zip):
+    allowed, msg = check_user_limit()
+    if not allowed:
+        raise gr.Error(msg)
     try:
-        world_path = unzip_world(world_zip)
-        return world_path, "✅ 世界上传并解压成功。"
-    except Exception as e:
-        return None, f"❌ 上传失败：{e}"
-
-def run_file_fill_ui(session_path, coords_file, block_name, slab_option):
-    if not session_path:
-        return "⚠️ 请先上传世界文件。"
-    slab = slab_option if slab_option in ("top", "bottom") else None
-    try:
-        result = fill_from_file(session_path, coords_file.name, block_name, slab)
-        return result
-    except Exception as e:
-        return f"❌ 操作失败：{e}"
-
-def run_region_fill_ui(session_path, x1, y1, z1, x2, y2, z2, block_name, slab_option):
-    if not session_path:
-        return "⚠️ 请先上传世界文件。"
-    slab = slab_option if slab_option in ("top", "bottom") else None
-    try:
-        coord1 = (int(x1), int(y1), int(z1))
-        coord2 = (int(x2), int(y2), int(z2))
-        result = fill_region(session_path, coord1, coord2, block_name, slab)
-        return result
-    except Exception as e:
-        return f"❌ 操作失败：{e}"
-
-def export_final_world(session_path):
-    if not session_path:
-        return None
-    return zip_world_folder(session_path)
-
+        return draw_quarter_circle_image(r)
+    finally:
+        release_user()
 
 # === Gradio 界面整合 ===
 
 with gr.Blocks(theme=gr.themes.Soft(), title="Slim MCBE Curve Tool ") as demo:
     gr.Markdown("# Slim MCBE Curve Tool  |  轻量级MCBE曲线工具")
     gr.Markdown("*Thanks to [Amulet](https://www.amuletmc.com/)*")
+    gr.Markdown("""
+    ⚠️ **重要提示**：
+    1. 临时文件会在30分钟后自动清理，请及时下载需要的文件
+    2. 关闭或刷新页面后，生成的文件将无法再次访问
+    3. 建议下载本地版本以获得更好的性能和稳定性
+    """)
+    
+    # 用户计数器显示
+    user_counter = gr.Markdown(f"当前在线用户：{current_users}/{MAX_CONCURRENT_USERS}")
     
     with gr.Tabs():
 
@@ -212,7 +254,8 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Slim MCBE Curve Tool ") as demo:
                             submit_btn = gr.Button("生成 轨道 图", variant="primary")
                         with gr.Column(scale=2):
                             output_plot = gr.Image(label="轨道 静态 图")
-                            gr.Markdown("### 下载txt坐标文件后上传至‘世界编辑工具’页面自动填充")                            
+                            gr.Markdown("### 下载txt坐标文件后上传至本地版本进行世界编辑")
+                            gr.Markdown("⚠️ **注意：文件将在30分钟后自动删除，请及时下载**")
                             with gr.Tabs():
                                 with gr.TabItem("交互式 可视化"):
                                     plotly_output = gr.Plot(label="交互式 轨道 图")
@@ -221,7 +264,6 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Slim MCBE Curve Tool ") as demo:
                                 with gr.TabItem("下载 区域"):
                                     download_coords = gr.File(label="下载 坐标 文件 (.txt)")
                                     download_html = gr.File(label="下载 HTML 可视化")
-
 
                     # 动态显示/隐藏曲线相关参数
                     def update_mode_ui(mode):
@@ -255,12 +297,19 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Slim MCBE Curve Tool ") as demo:
                         cache_examples=False
                     )
                     
+                    def generate_and_release(*args, **kwargs):
+                        try:
+                            result = generate_track_design(*args, **kwargs)
+                            return result
+                        finally:
+                            release_user()
+                    
                     submit_btn.click(
-                        fn=generate_track_design,
+                        fn=generate_and_release,
                         inputs=[mode, x0, y0, x1, y1, k1, k2, track_width,
                                 curvature, ground_height, use_mid_point, xm, ym, k_mid],
                         outputs=[output_plot, download_coords, download_html, coord_table, plotly_output]
-                        )
+                    )
 
                 with gr.TabItem("🔵 像素圆"):
                     radius_input = gr.Number(label="半径", value=50, precision=0)
@@ -269,51 +318,77 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Slim MCBE Curve Tool ") as demo:
                     image_output = gr.Image(type="pil", label="四分之 一 圆 图像")
                     run_button.click(fn=gradio_draw_quarter_circle, inputs=radius_input, outputs=[image_output, text_output])
 
-        # —— Tab2：Minecraft 多步骤编辑 —— 
-        with gr.TabItem("🌐 世界编辑工具"):
-            gr.Markdown("###步骤： 1. 上传世界 → 2. 多次操作 → 3. 导出最终世界###")
+        # —— Tab2：本地版本指引 —— 
+        with gr.TabItem("🌐 自动放置工具"):
+            gr.Markdown("""
+            # 🚀 自动放置仅本地版本可以使用
+            
+            ## 为什么使用本地版本？
+            
+            1. **性能更好**：本地运行，无需网络传输
+            2. **功能完整**：包含完整的世界编辑功能
+            
+            ## 📥 下载与安装
+            
+            ### 方式一：下载打包好的 EXE（推荐）
+            
+            **GitHub 项目地址**：[https://github.com/regivsbannia/Slim_MCBE_Curve_Tool](https://github.com/regivsbannia/Slim_MCBE_Curve_Tool)
+            
+            1. 访问上面的 GitHub 链接
+            2. 在 Releases 页面下载最新版本的 EXE 文件
+            3. 双击运行即可，无需安装 Python 环境
+            
+            ### 方式二：自行部署 Python 版本
+            
 
-            session_world = gr.State(value=None)
+            ```bash
+            # 1. 克隆项目或下载 Python 版本
+            # 方式 A：克隆项目（需要 git）
+            git clone https://github.com/regivsbannia/Slim_MCBE_Curve_Tool.git
+            cd Slim_MCBE_Curve_Tool/project_self
 
-            with gr.Row():
-                world_zip = gr.File(label="上传 世界 压缩包 (.zip)")
-                upload_btn = gr.Button("上传并解压", variant="primary")
-                upload_output = gr.Textbox(label="上传状态")
-            upload_btn.click(fn=start_session, inputs=[world_zip], outputs=[session_world, upload_output])
+            # 方式 B：下载 Release 中的 Python 版本（推荐）
+            # 从 GitHub Releases 页面下载 "XXX_python_zip" 压缩包
+            # 解压后进入解压目录
 
-            with gr.Tabs():
-                with gr.TabItem("坐标文件填充"):
-                    coords_file = gr.File(label="上传 坐标文件 (.txt 每行 x y z)")
-                    file_block = gr.Textbox(label="方块 名称 (如 stone 或 normal_stone_slab)")
-                    file_slab = gr.Radio(["none", "top", "bottom"], label="半砖 选项", value="none")
-                    btn1 = gr.Button("执行 坐标填充", variant="primary")
-                    output1 = gr.Textbox(label="执行 结果")
-                    btn1.click(fn=run_file_fill_ui,
-                               inputs=[session_world, coords_file, file_block, file_slab],
-                               outputs=[output1])
+            # 2. 安装依赖
+            pip install -r requirements.txt
 
-                with gr.TabItem("区域 坐标 填充"):
-                    x1 = gr.Number(label="X1")
-                    y1 = gr.Number(label="Y1")
-                    z1 = gr.Number(label="Z1")
-                    x2 = gr.Number(label="X2")
-                    y2 = gr.Number(label="Y2")
-                    z2 = gr.Number(label="Z2")
-                    region_block = gr.Textbox(label="方块 名称 (如 stone 或 normal_stone_slab)")
-                    region_slab = gr.Radio(["none", "top", "bottom"], label="半砖 选项", value="none")
-                    btn2 = gr.Button("执行 区域 填充", variant="primary")
-                    output2 = gr.Textbox(label="执行 结果")
-                    btn2.click(fn=run_region_fill_ui,
-                               inputs=[session_world, x1, y1, z1, x2, y2, z2, region_block, region_slab],
-                               outputs=[output2])
-
-            with gr.Row():
-                export_btn = gr.Button("📦 导出 最终 世界", variant="primary")
-                download_world = gr.File(label="下载 世界 (.zip)", interactive=False)
-            export_btn.click(fn=export_final_world, inputs=[session_world], outputs=[download_world])
+            # 3. 运行程序
+            python combined_demo.py
+            ```
+            
+            ## ❓ 常见问题
+            
+            **Q: 本地版本有病毒吗？**  
+            A: 没有。代码完全开源，可以在 GitHub 上查看所有源代码。请允许windows运行本exe文件。
+            
+            **Q: 需要安装 Minecraft 吗？**  
+            A: 不需要。本工具只处理 Minecraft 世界文件，不需要游戏本体。
+            
+            **Q: 支持哪些 Minecraft 版本？**  
+            A: 支持 Minecraft Bedrock Edition 最新版本。
+            
+            **Q: 遇到问题怎么办？**  
+            A: 自行部署python版本
+            """)
+            
+            gr.Markdown("---")
+            gr.Markdown("""
+            ⚠️ **安全提示**：网页版已移除存档编辑功能，以防止恶意文件攻击服务器。  
+            ✅ **建议所有用户都使用本地版本以获得最佳体验和完整功能。**
+            """)
 
     gr.Markdown("---\nMCBE Curve Tool，欢迎体验！")
     
+    # 页面关闭时清理用户计数
+    demo.unload(release_user)
+    
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=7860)
-
+    demo.queue(max_size=MAX_CONCURRENT_USERS).launch(
+        server_name="0.0.0.0", 
+        server_port=7861,
+        show_error=True
+    )
+    # 程序退出时清理所有临时文件
+    temp_manager.cleanup_all()
