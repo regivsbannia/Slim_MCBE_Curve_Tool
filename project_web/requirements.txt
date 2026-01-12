@@ -1,5 +1,6 @@
 gradio>=4.0.0
 zipfile36
+pathlib
 numpy
 pandas
 matplotlib>=3.5

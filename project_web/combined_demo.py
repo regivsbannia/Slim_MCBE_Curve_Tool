@@ -122,41 +122,60 @@ def gradio_draw_quarter_circle(r):
 
 # === Minecraft 世界多步骤编辑功能 ===
 
-def run_file_fill(world_path, coords_file, block_name, slab_choice):
-    """
-    Gradio 调用：从文件填充
-    slab_choice: 三个选项 "none"/"top"/"bottom"
-    """
-    # 如果用户选择 none，就把 slab_choice 设为 None
-    block_half = slab_choice if slab_choice in ("top", "bottom") else None
+def unzip_world(zip_file):
+    tmp_dir = tempfile.mkdtemp()
+    with zipfile.ZipFile(zip_file.name, 'r') as zip_ref:
+        zip_ref.extractall(tmp_dir)
+    # 如果解压后没有直接的 level.dat，则进入第一层子目录
+    if not (Path(tmp_dir) / "level.dat").exists():
+        subdirs = [f for f in Path(tmp_dir).iterdir() if f.is_dir()]
+        if subdirs:
+            return str(subdirs[0])
+    return tmp_dir
 
+def zip_world_folder(world_folder):
+    zip_path = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
+    with zipfile.ZipFile(zip_path.name, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for root, _, files in os.walk(world_folder):
+            for file in files:
+                file_path = os.path.join(root, file)
+                arcname = os.path.relpath(file_path, world_folder)
+                zipf.write(file_path, arcname)
+    return zip_path.name
+
+def start_session(world_zip):
     try:
-        result = fill_from_file(world_path, coords_file.name, block_name, block_half)
+        world_path = unzip_world(world_zip)
+        return world_path, "✅ 世界上传并解压成功。"
     except Exception as e:
-        result = f"❌ 运行时发生错误：{e}"
-    return result
+        return None, f"❌ 上传失败：{e}"
 
-
-def run_region_fill(
-    world_path,
-    x1, y1, z1,
-    x2, y2, z2,
-    block_name,
-    slab_choice
-):
-    """
-    Gradio 调用：按区域填充
-    slab_choice: 三个选项 "none"/"top"/"bottom"
-    """
-    block_half = slab_choice if slab_choice in ("top", "bottom") else None
-    coord1 = (int(x1), int(y1), int(z1))
-    coord2 = (int(x2), int(y2), int(z2))
-
+def run_file_fill_ui(session_path, coords_file, block_name, slab_option):
+    if not session_path:
+        return "⚠️ 请先上传世界文件。"
+    slab = slab_option if slab_option in ("top", "bottom") else None
     try:
-        result = fill_region(world_path, coord1, coord2, block_name, block_half)
+        result = fill_from_file(session_path, coords_file.name, block_name, slab)
+        return result
     except Exception as e:
-        result = f"❌ 运行时发生错误：{e}"
-    return result
+        return f"❌ 操作失败：{e}"
+
+def run_region_fill_ui(session_path, x1, y1, z1, x2, y2, z2, block_name, slab_option):
+    if not session_path:
+        return "⚠️ 请先上传世界文件。"
+    slab = slab_option if slab_option in ("top", "bottom") else None
+    try:
+        coord1 = (int(x1), int(y1), int(z1))
+        coord2 = (int(x2), int(y2), int(z2))
+        result = fill_region(session_path, coord1, coord2, block_name, slab)
+        return result
+    except Exception as e:
+        return f"❌ 操作失败：{e}"
+
+def export_final_world(session_path):
+    if not session_path:
+        return None
+    return zip_world_folder(session_path)
 
 
 # === Gradio 界面整合 ===
@@ -254,56 +273,47 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Slim MCBE Curve Tool ") as demo:
         with gr.TabItem("🌐 世界编辑工具"):
             gr.Markdown("###步骤： 1. 上传世界 → 2. 多次操作 → 3. 导出最终世界###")
 
-            tabs = gr.Tabs()
+            session_world = gr.State(value=None)
 
-            # —— Tab1：从文件坐标批量放置 —— 
-            with tabs:
-                with gr.TabItem("从文件坐标填充"):
-                    gr.Markdown("**说明：** 上传一个文本文件，里面每行是 `x y z`，程序会将所有这些点设置成指定方块。")
-                    file_world = gr.Textbox(label="世界文件夹路径", placeholder="例如：E:/my_mc_world")
-                    coords_file = gr.File(label="坐标文件 (*.txt)，每行格式：x y z")
-                    file_block = gr.Textbox(label="方块名称", placeholder="例如：stone 或 normal_stone_slab")
-                    file_slab = gr.Radio(
-                        choices=["none", "top", "bottom"],
-                        label="如果是半砖，选择‘top’或‘bottom’，否则选‘none’",
-                        value="none"
-                    )
-                    file_btn = gr.Button("开始从文件放置")
-                    file_output = gr.Textbox(label="运行结果")
+            with gr.Row():
+                world_zip = gr.File(label="上传 世界 压缩包 (.zip)")
+                upload_btn = gr.Button("上传并解压", variant="primary")
+                upload_output = gr.Textbox(label="上传状态")
+            upload_btn.click(fn=start_session, inputs=[world_zip], outputs=[session_world, upload_output])
 
-                    file_btn.click(
-                        run_file_fill,
-                        inputs=[file_world, coords_file, file_block, file_slab],
-                        outputs=[file_output]
-                    )
+            with gr.Tabs():
+                with gr.TabItem("坐标文件填充"):
+                    coords_file = gr.File(label="上传 坐标文件 (.txt 每行 x y z)")
+                    file_block = gr.Textbox(label="方块 名称 (如 stone 或 normal_stone_slab)")
+                    file_slab = gr.Radio(["none", "top", "bottom"], label="半砖 选项", value="none")
+                    btn1 = gr.Button("执行 坐标填充", variant="primary")
+                    output1 = gr.Textbox(label="执行 结果")
+                    btn1.click(fn=run_file_fill_ui,
+                               inputs=[session_world, coords_file, file_block, file_slab],
+                               outputs=[output1])
 
-                # —— Tab2：按区域填充 —— 
-                with gr.TabItem("按区域填充"):
-                    gr.Markdown("**说明：** 输入两个对角点坐标，程序会填充此区域。")
-                    region_world = gr.Textbox(label="世界文件夹路径", placeholder="例如：E:/my_mc_world")
-                    x1_in = gr.Number(label="第一个对角点 X1", value=0)
-                    y1_in = gr.Number(label="第一个对角点 Y1", value=0)
-                    z1_in = gr.Number(label="第一个对角点 Z1", value=0)
+                with gr.TabItem("区域 坐标 填充"):
+                    x1 = gr.Number(label="X1")
+                    y1 = gr.Number(label="Y1")
+                    z1 = gr.Number(label="Z1")
+                    x2 = gr.Number(label="X2")
+                    y2 = gr.Number(label="Y2")
+                    z2 = gr.Number(label="Z2")
+                    region_block = gr.Textbox(label="方块 名称 (如 stone 或 normal_stone_slab)")
+                    region_slab = gr.Radio(["none", "top", "bottom"], label="半砖 选项", value="none")
+                    btn2 = gr.Button("执行 区域 填充", variant="primary")
+                    output2 = gr.Textbox(label="执行 结果")
+                    btn2.click(fn=run_region_fill_ui,
+                               inputs=[session_world, x1, y1, z1, x2, y2, z2, region_block, region_slab],
+                               outputs=[output2])
 
-                    x2_in = gr.Number(label="第二个对角点 X2", value=0)
-                    y2_in = gr.Number(label="第二个对角点 Y2", value=0)
-                    z2_in = gr.Number(label="第二个对角点 Z2", value=0)
-
-                    region_block = gr.Textbox(label="方块名称", placeholder="例如：stone 或 normal_stone_slab")
-                    region_slab = gr.Radio(
-                        choices=["none", "top", "bottom"],
-                        label="如果是半砖，选择‘top’或‘bottom’，否则选‘none’",
-                        value="none"
-                    )
-                    region_btn = gr.Button("开始区域填充")
-                    region_output = gr.Textbox(label="运行结果")
-
-                    region_btn.click(
-                        run_region_fill,
-                        inputs=[region_world, x1_in, y1_in, z1_in, x2_in, y2_in, z2_in, region_block, region_slab],
-                        outputs=[region_output]
-                    )
+            with gr.Row():
+                export_btn = gr.Button("📦 导出 最终 世界", variant="primary")
+                download_world = gr.File(label="下载 世界 (.zip)", interactive=False)
+            export_btn.click(fn=export_final_world, inputs=[session_world], outputs=[download_world])
 
     gr.Markdown("---\nMCBE Curve Tool，欢迎体验！")
-
+    
+if __name__ == "__main__":
+    demo.launch(server_name="0.0.0.0", server_port=7860)
 
